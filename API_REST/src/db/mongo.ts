@@ -1,28 +1,33 @@
-import {
-  Database,
-  MongoClient,
-} from "https://deno.land/x/mongo@v0.31.1/mod.ts";
-import { UserSchema, AuthorSchema, BookSchema } from "./schemas.ts";
-import { config } from "https://deno.land/x/dotenv@v3.2.0/mod.ts";
-
-await config({ export: true, allowEmptyValues: true });
+import {Database, MongoClient,} from "https://deno.land/x/mongo@v0.31.1/mod.ts";
+import {TransactionSchema, UserSchema} from "./schemas.ts";
+import {config} from "https://deno.land/x/dotenv@v3.2.0/mod.ts";
 
 const connectMongoDB = async (): Promise<Database> => {
-  const mongo_usr = Deno.env.get("MONGO_USR");
-  const mongo_pwd = Deno.env.get("MONGO_PWD");
-  const db_name = Deno.env.get("DB_NAME");
-  const mongo_uri = Deno.env.get("URL_MONGO");
+  const env = config();
 
-  const mongo_url = `mongodb+srv://${mongo_usr}:${mongo_pwd}@${mongo_uri}/${db_name}?authMechanism=SCRAM-SHA-1`;
+  if (!env.MONGO_USR || !env.MONGO_PWD) {
+    throw new Error("MONGO_USR and MONGO_PWD must be set in .env file");
+  }
+
+  env.MONGO_USR;
+  env.MONGO_PWD;
+  const db_Name = "Bank";
+  const mongo_url = `mongodb+srv://${env.MONGO_USR}:${env.MONGO_PWD}@nebrija.bvmsqgm.mongodb.net/${db_Name}?authMechanism=SCRAM-SHA-1`;
 
   const client = new MongoClient();
-  await client.connect(mongo_url);
-  return client.database(db_name);
+  try {
+    await client.connect(mongo_url);
+    console.log("Connected to database");
+  } catch (e) {
+    console.log("Error connecting to MongoDB: ", e);
+  }
+
+  return client.database(db_Name);
 };
 
 const db = await connectMongoDB();
-console.info(`MongoDB ${db.name} connected`);
 
 export const UsersCollection = db.collection<UserSchema>("Users");
-export const BooksCollection = db.collection<BookSchema>("Books");
-export const AuthorsCollection = db.collection<AuthorSchema>("Authors");
+
+export const TransactionsCollection =
+  db.collection<TransactionSchema>("Transactions");

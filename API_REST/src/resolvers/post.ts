@@ -1,187 +1,209 @@
-import * as bcrypt from "https://deno.land/x/bcrypt@v0.3.0/mod.ts";
-import { RouterContext, Status } from "https://deno.land/x/oak@v11.1.0/mod.ts";
 import {
-  UsersCollection,
-  AuthorsCollection,
-  BooksCollection,
-} from "../db/mongo.ts";
-import { UserSchema, AuthorSchema, BookSchema } from "../db/schemas.ts";
-import { z } from "https://deno.land/x/zod@v3.19.1/mod.ts";
+  Context,
+  RouteParams,
+  RouterContext,
+  State,
+  Status,
+} from "https://deno.land/x/oak@v11.1.0/mod.ts";
+import { TransactionsCollection, UsersCollection } from "../db/mongo.ts";
+import { makeTransaction, User } from "../model/types.ts";
 import {
-  formatError,
-  idValidator,
-  nameValidator,
-  pagesValidator,
-  titleValidator,
+  alwaysValid,
+  cleanName,
+  cleanSurnames,
+  validateDNI,
+  validateEmail,
+  validateID,
+  validatePhone,
+  validatePositiveNumber,
 } from "../model/validation.ts";
-import { InsertDocument } from "https://deno.land/x/mongo@v0.31.1/mod.ts";
+import { assertTypeAndExistence } from "./schemavalidation.ts";
+import { TransactionSchema, UserSchema } from "../db/schemas.ts";
+import { generate } from "../model/iban.ts";
+
+type AddTransactionBody = {
+  id_sender: string;
+  id_receiver: string;
+  amount: number;
+};
+
+type AddUserBody = {
+  dni: string;
+  name: string;
+  surname: string;
+  phone: string;
+  email: string;
+};
+
+type NewTransaction = {
+  amount: number;
+  sender: UserSchema;
+  receiver: UserSchema;
+};
+
+type AddTransactionContext = RouterContext<
+  "/addTransaction",
+  Record<string, undefined>,
+  Record<string, any>
+>;
 
 type AddUserContext = RouterContext<
   "/addUser",
-  Record<string | number, string | undefined>,
+  Record<string, undefined>,
   Record<string, any>
 >;
 
-type AddAuthorContext = RouterContext<
-  "/addAuthor",
-  Record<string | number, string | undefined>,
-  Record<string, any>
->;
+/*addTransaction -> Añadirá una transacción a un usuario.*/
+export const addTransaction = async (ctx: AddTransactionContext) => {
+  // Get body.
+  let addTransactionBody: AddTransactionBody | undefined;
+  try {
+    const body = await ctx.request.body({ type: "json" });
+    addTransactionBody = await body.value;
+  } catch (e) {
+    ctx.throw(Status.InternalServerError, e.message);
+  }
 
-type AddBookContext = RouterContext<
-  "/addBook",
-  Record<string | number, string | undefined>,
-  Record<string, any>
->;
+  // Validación.
+  const { amount, sender, receiver } = await getNewTransaction(
+    ctx,
+    addTransactionBody!
+  );
 
-const addUserValidator = z
-  .object({
-    name: nameValidator,
-    email: z
-      .string()
-      .trim()
-      .email()
-      .transform((s) => s.toLowerCase()),
-    password: z
-      .string()
-      .min(8)
-      .transform(async (s) => {
-        return await bcrypt.hash(s);
-      }),
-  })
-  .strict();
+  // Procesamos la transacción.
+  let transaction;
+  try {
+    transaction = makeTransaction(sender, receiver, amount);
+  } catch (e) {
+    ctx.throw(Status.BadRequest, e.message);
+  }
 
-/**
- * POST /addUser
- * Creates and inserts a new user.
- *
- * REQUEST
- * Body: JSON - {
- *     name: string,
- *     email: string,
- *     password: string
- * }
- *
- * RESPONSE
- *  - 200: JSON - Newly created User.
- *  - 400: TEXT - Validation errors.
- *  - 500
- */
+  // Insertamos la transacción y actualizamos a los usuarios.
+  try {
+    await Promise.all([
+      TransactionsCollection.insertOne(transaction),
+      UsersCollection.updateOne(
+        { _id: sender._id },
+        { $set: { balance: sender.balance } }
+      ),
+      UsersCollection.updateOne(
+        { _id: receiver._id },
+        { $set: { balance: receiver.balance } }
+      ),
+    ]);
+  } catch (e) {
+    ctx.throw(Status.InternalServerError, e.message);
+  }
+
+  ctx.response.body = transaction as TransactionSchema;
+};
+
+// addUser -> Añadirá un usuario a la base de datos del banco comprobando todos
+// sus datos.
 export const addUser = async (ctx: AddUserContext) => {
-  const value = await ctx.request.body({ type: "json" }).value;
-
-  let params;
+  // Get body.
+  let addUserBody: AddUserBody | undefined;
   try {
-    params = await addUserValidator.parseAsync(value);
+    const body = await ctx.request.body({ type: "json" });
+    addUserBody = await body.value;
   } catch (e) {
-    ctx.throw(Status.BadRequest, formatError(e));
+    ctx.throw(Status.InternalServerError, e.message);
   }
 
-  const user: InsertDocument<UserSchema> = {
-    ...params,
-    cartBookIDs: [],
-    createdAt: new Date(),
-  };
+  // Validación.
+  const user = await getNewUser(ctx, addUserBody!);
 
-  await UsersCollection.insertOne(user);
+  // Insertamos el nuevo usuario.
+  try {
+    const insertID = await UsersCollection.insertOne(user);
+    user.id = insertID.toString();
+  } catch (e) {
+    ctx.throw(Status.InternalServerError, e.message);
+  }
 
-  ctx.response.body = user as UserSchema;
+  ctx.response.body = user;
 };
 
-const addAuthorValidator = z
-  .object({
-    name: nameValidator,
-  })
-  .strict();
+async function getNewTransaction(
+  ctx: Context,
+  addTransactionBody: AddTransactionBody
+): Promise<NewTransaction> {
+  assertTypeAndExistence(ctx, "id_sender", "string", addTransactionBody!);
+  assertTypeAndExistence(ctx, "id_receiver", "string", addTransactionBody!);
+  assertTypeAndExistence(ctx, "amount", "number", addTransactionBody!);
 
-/**
- * POST /addAuthor
- * Creates and inserts an author.
- *
- * REQUEST
- * Body: JSON - { name: string }
- *
- * RESPONSE
- * Status:
- *  - 200: JSON - Newly created Author.
- *  - 400: TEXT - Validation errors.
- *  - 500
- */
-export const addAuthor = async (ctx: AddAuthorContext) => {
-  const value = await ctx.request.body({ type: "json" }).value;
+  const id_sender = validateID(addTransactionBody.id_sender);
+  const id_receiver = validateID(addTransactionBody.id_receiver);
+  const amount = validatePositiveNumber(addTransactionBody.amount);
 
-  let params;
+  let sender, receiver;
   try {
-    params = addAuthorValidator.parse(value);
+    [sender, receiver] = await Promise.all([
+      UsersCollection.findOne({ _id: id_sender }),
+      UsersCollection.findOne({ _id: id_receiver }),
+    ]);
   } catch (e) {
-    ctx.throw(Status.BadRequest, formatError(e));
+    ctx.throw(Status.InternalServerError, e.message);
   }
 
-  const author: InsertDocument<AuthorSchema> = {
-    ...params,
-    bookIDs: [],
+  if (sender === undefined) {
+    ctx.throw(Status.NotFound, "no user with id_sender");
+  }
+  if (receiver === undefined) {
+    ctx.throw(Status.NotFound, "no user with id_receiver");
+  }
+
+  return {
+    receiver: receiver,
+    sender: sender,
+    amount: amount,
   };
+}
 
-  await AuthorsCollection.insertOne(author);
+async function getNewUser(
+  ctx: Context,
+  addUserBody: AddUserBody
+): Promise<User> {
+  assertTypeAndExistence(ctx, "dni", "string", addUserBody);
+  assertTypeAndExistence(ctx, "name", "string", addUserBody);
+  assertTypeAndExistence(ctx, "surname", "string", addUserBody);
+  assertTypeAndExistence(ctx, "phone", "string", addUserBody);
+  assertTypeAndExistence(ctx, "email", "string", addUserBody);
 
-  ctx.response.body = author as AuthorSchema;
-};
-
-const addBookValidator = z
-  .object({
-    title: titleValidator,
-    author_id: idValidator,
-    pages: pagesValidator,
-  })
-  .strict();
-
-/**
- * POST /addBook
- * Inserts a new book.
- *
- * REQUEST
- * Body: JSON - {
- *      title: string,
- *      author_id: ObjectId,
- *      pages: number,
- * }
- *
- * RESPONSE
- *  - 200: JSON - Newly created book.
- *  - 400: TEXT - Validation errors.
- *  - 404: TEXT - Name of resource not found.
- *  - 500
- */
-export const addBook = async (ctx: AddBookContext) => {
-  const value = await ctx.request.body({ type: "json" }).value;
-
-  let params;
+  let user;
   try {
-    params = addBookValidator.parse(value);
+    user = {
+      id: "",
+      dni: validateDNI(addUserBody.dni),
+      name: alwaysValid(cleanName(addUserBody.name)),
+      surname: alwaysValid(cleanSurnames(addUserBody.surname)),
+      phone: validatePhone(addUserBody.phone),
+      email: validateEmail(addUserBody.email),
+      // IBAN generado aleatoriamente.
+      iban: generate(),
+      // Insertamos con 1000 para poder probar transacciones.
+      balance: 1000,
+    };
   } catch (e) {
-    ctx.throw(Status.BadRequest, formatError(e));
+    ctx.throw(Status.BadRequest, e.message);
   }
 
-  if (
-    (await AuthorsCollection.countDocuments(
-      { _id: params.author_id },
-      { limit: 1 }
-    )) === 0
-  ) {
-    ctx.throw(Status.NotFound, "author not found");
+  // Comprobar si el usuario existe.
+  let duplicateCount = 0;
+  try {
+    duplicateCount = await UsersCollection.countDocuments({
+      $or: [{ email: user.email }, { dni: user.dni }, { phone: user.phone }],
+    });
+  } catch (e) {
+    ctx.throw(Status.InternalServerError, e.message);
   }
 
-  const bookInsert: InsertDocument<BookSchema> = {
-    authorID: params.author_id,
-    title: params.title,
-    pages: params.pages,
-    ISBN: crypto.randomUUID(),
-  };
+  if (duplicateCount > 0) {
+    ctx.throw(
+      Status.BadRequest,
+      "user already exists with some or all of the same details"
+    );
+  }
 
-  const bookID = await BooksCollection.insertOne(bookInsert, {});
-  await AuthorsCollection.updateOne({ _id: params.author_id }, {
-    $push: { bookIDs: bookID },
-  } as any);
-
-  ctx.response.body = bookInsert as BookSchema;
-};
+  return user;
+}

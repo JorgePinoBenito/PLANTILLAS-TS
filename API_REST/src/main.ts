@@ -1,45 +1,46 @@
 import {
-    Application,
-    isHttpError,
-    Router,
-    Status,
+  Application,
+  isHttpError,
+  Router,
+  Status,
 } from "https://deno.land/x/oak@v11.1.0/mod.ts";
 
-import {getBooks, getUser} from "./resolvers/get.ts";
-import {deleteUser} from "./resolvers/delete.ts";
-import {addUser, addAuthor, addBook} from "./resolvers/post.ts";
-import {updateCart} from "./resolvers/put.ts";
+import { getUser } from "./resolvers/get.ts";
+import { deleteUser } from "./resolvers/delete.ts";
+import { addTransaction, addUser } from "./resolvers/post.ts";
 
 const router = new Router();
 
 router
-    .get("/getBooks", getBooks)
-    .get("/getUser/:id", getUser)
-    .post("/addUser", addUser)
-    .post("/addAuthor", addAuthor)
-    .post("/addBook", addBook)
-    .put("/updateCart", updateCart)
-    .delete("/deleteUser/:id", deleteUser);
+  .get("/getUser/:parametro", getUser)
+  .post("/addUser", addUser)
+  .post("/addTransaction", addTransaction)
+  .delete("/deleteUser/:email", deleteUser);
 
 const app = new Application();
 
 app.use(async (ctx, next) => {
-    try {
-        await next();
-    } catch (err) {
-        if (isHttpError(err) && err.status !== Status.InternalServerError) {
-            ctx.response.status = err.status;
-            ctx.response.body = err.message;
-        } else {
-            console.log(err);
-            ctx.response.status = Status.InternalServerError;
-        }
+  try {
+    await next();
+  } catch (err) {
+    if (isHttpError(err)) {
+      switch (err.status) {
+        case Status.InternalServerError:
+          console.log(err.message);
+          ctx.response.status = err.status;
+          break;
+        default:
+          ctx.response.status = err.status;
+          ctx.response.body = err.message;
+      }
+    } else {
+      console.log(err);
+      ctx.response.status = Status.InternalServerError;
     }
+  }
 });
-
-const server_port = Deno.env.get("PORT");
 
 app.use(router.routes());
 app.use(router.allowedMethods());
 
-await app.listen({port: Number(server_port)});
+await app.listen({ port: 7777 });

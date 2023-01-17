@@ -1,43 +1,41 @@
 import {RouterContext, Status} from "https://deno.land/x/oak@v11.1.0/mod.ts";
 import {UsersCollection} from "../db/mongo.ts";
-import {z} from "https://deno.land/x/zod@v3.19.1/mod.ts";
-import {formatError, idValidator} from "../model/validation.ts";
-import {getQuery} from "https://deno.land/x/oak@v11.1.0/helpers.ts";
+import {validateEmail} from "../model/validation.ts";
+import {UserSchema} from "../db/schemas.ts";
 
-type DeleteUserContext = RouterContext<"/deleteUser/:id",
-    {
-        id: string;
-    } & Record<string | number, string | undefined>,
-    Record<string, any>>;
+type DeleteUserContext = RouterContext<
+    "/deleteUser/:email",
+    {email: string},
+    Record<string, any>
+>;
 
-const deleteUserValidator = z.object({
-    id: idValidator,
-});
-
-/**
- * DELETE /deleteUser/:id
- * Deletes user by id.
- *
- * REQUEST
- * URI: - { id: ObjectId }
- *
- * RESPONSE
- *  - 200
- *  - 400: TEXT - Validation errors.
- *  - 404
- *  - 500
- */
+// deleteUser/email -> Eliminará un usuario de la base de datos del banco por su
+// email.
 export const deleteUser = async (ctx: DeleteUserContext) => {
-    let params;
+    let email = ctx.params.email;
+
     try {
-        params = deleteUserValidator.parse(getQuery(ctx, {mergeParams: true}));
+        email = validateEmail(email);
+    } catch (err) {
+        ctx.throw(Status.BadRequest, err.message)
+    }
+
+    let user: UserSchema | undefined;
+    try {
+        user = await UsersCollection.findOne({email: email});
+    } catch (err) {
+        ctx.throw(Status.InternalServerError, err.message)
+    }
+
+    if (user === undefined) {
+        ctx.throw(Status.NotFound, "no user with such email")
+    }
+
+    try {
+        await UsersCollection.deleteOne({email: email});
     } catch (e) {
-        ctx.throw(Status.BadRequest, formatError(e));
+        ctx.throw(Status.InternalServerError, e.message)
     }
 
-    if (await UsersCollection.deleteOne({id: params.id}) === 0) {
-        ctx.throw(Status.NotFound);
-    }
-
-    ctx.response.status = Status.OK;
+    ctx.response.status = Status.OK
 };
